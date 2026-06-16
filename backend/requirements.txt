@@ -1,0 +1,18 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+pydantic[email]==2.8.2
+PyJWT==2.9.0
+bcrypt==4.2.0
+cryptography==43.0.1
+httpx==0.27.2
+pdfplumber==0.11.4
+playwright==1.47.0
+python-dotenv==1.0.1
+# Optional parser for cleaner LinkedIn post extraction. Bot falls back gracefully
+# to stdlib HTML parsing if Scrapling is unavailable.
+scrapling==0.4.8
+# Optional. linkedin_posts_bot.py falls back gracefully if Crawl4AI is missing.
+# Keep this disabled by default because recent Crawl4AI releases require newer
+# Playwright/Pydantic versions than this project pins.
+# crawl4ai>=0.4.0

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from auth_utils import get_current_user
 from database import get_db
+from encryption import encrypt, decrypt
 
 router = APIRouter()
 
@@ -31,11 +32,47 @@ def _ensure_email_table():
 _ensure_email_table()
 
 
+def get_email_config(user_id: int) -> dict:
+    """
+    Ambil konfigurasi email user (dengan app_password didecrypt).
+    Dipakai oleh linkedin_posts_bot saat mengirim email ke recruiter.
+    """
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT smtp_host, smtp_port, sender_email, app_password FROM email_configs WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if row:
+            try:
+                password = decrypt(row["app_password"]) if row["app_password"] else ""
+            except Exception:
+                # Backward compat: jika value lama masih plaintext
+                password = row["app_password"]
+            return {
+                "smtp_host": row["smtp_host"],
+                "smtp_port": int(row["smtp_port"]),
+                "sender_email": row["sender_email"],
+                "app_password": password,
+                "configured": bool(row["sender_email"] and password),
+            }
+    finally:
+        db.close()
+    # Fallback ke .env
+    return {
+        "smtp_host": os.getenv("SMTP_HOST", "smtp.gmail.com"),
+        "smtp_port": int(os.getenv("SMTP_PORT", 587)),
+        "sender_email": os.getenv("EMAIL_SENDER", ""),
+        "app_password": os.getenv("EMAIL_APP_PASSWORD", ""),
+        "configured": bool(os.getenv("EMAIL_SENDER") and os.getenv("EMAIL_APP_PASSWORD")),
+    }
+
+
 class EmailConfigIn(BaseModel):
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587
     sender_email: str
-    app_password: str  # akan disimpan as-is; produksi: enkripsi
+    app_password: str  # akan dienkripsi sebelum disimpan
 
 
 class EmailTestIn(BaseModel):
@@ -44,35 +81,21 @@ class EmailTestIn(BaseModel):
 
 @router.get("/status")
 def email_config_status(user=Depends(get_current_user)):
-    """Kembalikan konfigurasi email aktif untuk user ini."""
-    db = get_db()
-    row = db.execute(
-        "SELECT smtp_host, smtp_port, sender_email, app_password FROM email_configs WHERE user_id = ?",
-        (user["id"],)
-    ).fetchone()
-    db.close()
-
-    if row:
-        return {
-            "configured": bool(row["sender_email"] and row["app_password"]),
-            "sender":     row["sender_email"],
-            "smtp_host":  row["smtp_host"],
-            "smtp_port":  row["smtp_port"],
-        }
-
-    # Fallback ke .env (backward compat)
+    """Kembalikan konfigurasi email aktif untuk user ini (tanpa expose password)."""
+    cfg = get_email_config(user["id"])
     return {
-        "configured": bool(os.getenv("EMAIL_SENDER") and os.getenv("EMAIL_APP_PASSWORD")),
-        "sender":     os.getenv("EMAIL_SENDER", ""),
-        "smtp_host":  os.getenv("SMTP_HOST", "smtp.gmail.com"),
-        "smtp_port":  int(os.getenv("SMTP_PORT", 587)),
+        "configured": cfg["configured"],
+        "sender": cfg["sender_email"],
+        "smtp_host": cfg["smtp_host"],
+        "smtp_port": cfg["smtp_port"],
     }
 
 
 @router.put("")
 @router.put("/")
 def save_email_config(body: EmailConfigIn, user=Depends(get_current_user)):
-    """Simpan / update konfigurasi email untuk user ini."""
+    """Simpan / update konfigurasi email untuk user ini (app_password dienkripsi)."""
+    encrypted_password = encrypt(body.app_password.strip())
     db = get_db()
     db.execute("""
         INSERT INTO email_configs (user_id, smtp_host, smtp_port, sender_email, app_password, updated_at)
@@ -83,37 +106,20 @@ def save_email_config(body: EmailConfigIn, user=Depends(get_current_user)):
             sender_email = excluded.sender_email,
             app_password = excluded.app_password,
             updated_at   = excluded.updated_at
-    """, (user["id"], body.smtp_host, body.smtp_port, body.sender_email.strip(), body.app_password.strip()))
+    """, (user["id"], body.smtp_host, body.smtp_port, body.sender_email.strip(), encrypted_password))
     db.commit()
     db.close()
-    return {"message": "Konfigurasi email disimpan"}
+    return {"message": "Konfigurasi email disimpan (password terenkripsi)"}
 
 
 @router.post("/test")
 def send_test_email(body: Optional[EmailTestIn] = None, user=Depends(get_current_user)):
     """Kirim email percobaan ke email sendiri sebelum bot mengirim ke perusahaan."""
-    db = get_db()
-    row = db.execute(
-        "SELECT smtp_host, smtp_port, sender_email, app_password FROM email_configs WHERE user_id = ?",
-        (user["id"],)
-    ).fetchone()
-    db.close()
-
-    if row:
-        smtp_host = row["smtp_host"]
-        smtp_port = int(row["smtp_port"])
-        sender_email = row["sender_email"]
-        app_password = row["app_password"]
-    else:
-        smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
-        smtp_port = int(os.getenv("SMTP_PORT", 587))
-        sender_email = os.getenv("EMAIL_SENDER", "")
-        app_password = os.getenv("EMAIL_APP_PASSWORD", "")
-
-    if not sender_email or not app_password:
+    cfg = get_email_config(user["id"])
+    if not cfg["configured"]:
         raise HTTPException(status_code=400, detail="Email belum dikonfigurasi. Isi Email Pengirim dan App Password dulu.")
 
-    recipient_email = (body.recipient_email if body else None) or sender_email
+    recipient_email = (body.recipient_email if body else None) or cfg["sender_email"]
     recipient_email = recipient_email.strip()
     if not recipient_email:
         raise HTTPException(status_code=400, detail="Email tujuan test wajib diisi.")
@@ -121,10 +127,10 @@ def send_test_email(body: Optional[EmailTestIn] = None, user=Depends(get_current
     from workers.linkedin_posts_bot import send_email
 
     success, err = send_email(
-        smtp_host,
-        smtp_port,
-        sender_email,
-        app_password,
+        cfg["smtp_host"],
+        cfg["smtp_port"],
+        cfg["sender_email"],
+        cfg["app_password"],
         recipient_email,
         "Test Email ORDAL",
         "Ini email test dari ORDAL. Jika email ini masuk, konfigurasi SMTP sudah siap sebelum kirim ke email perusahaan.",

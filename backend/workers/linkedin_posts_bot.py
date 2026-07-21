@@ -29,6 +29,7 @@ from urllib.parse import urljoin, urlparse, quote_plus
 
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
+from workers.browser_launcher import launch_browser
 
 from workers.gemini_service import render_cover_letter_template, validate_and_fix_email
 from workers.answer_helper import answer_application_question, save_question_answer
@@ -199,33 +200,33 @@ def _get_email_config(user_id: int) -> dict:
     """Get email config from database for a user."""
     try:
         from database import get_db
+        from routers.email_config import get_email_config
+
+        cfg = get_email_config(user_id)
+        if not cfg.get("configured"):
+            return {}
+
         db = get_db()
         row = db.execute(
             """
-            SELECT
-                e.smtp_host,
-                e.smtp_port,
-                e.sender_email,
-                e.app_password,
-                COALESCE(u.name, '') AS user_name,
-                COALESCE(p.testing_email_mode, 0) AS testing_email_mode
-            FROM email_configs e
-            LEFT JOIN users u ON u.id = e.user_id
-            LEFT JOIN user_preferences p ON p.user_id = e.user_id
-            WHERE e.user_id = ?
+            SELECT COALESCE(u.name, '') AS user_name,
+                   COALESCE(p.testing_email_mode, 0) AS testing_email_mode
+            FROM users u
+            LEFT JOIN user_preferences p ON p.user_id = u.id
+            WHERE u.id = ?
             """,
             (user_id,),
         ).fetchone()
         db.close()
-        if row and row["sender_email"] and row["app_password"]:
-            return {
-                "smtp_host": row["smtp_host"],
-                "smtp_port": int(row["smtp_port"]),
-                "sender_email": row["sender_email"],
-                "app_password": row["app_password"],
-                "user_name": row["user_name"],
-                "testing_email_mode": bool(row["testing_email_mode"]),
-            }
+
+        return {
+            "smtp_host": cfg["smtp_host"],
+            "smtp_port": cfg["smtp_port"],
+            "sender_email": cfg["sender_email"],
+            "app_password": cfg["app_password"],
+            "user_name": row["user_name"] if row else "",
+            "testing_email_mode": bool(row["testing_email_mode"]) if row else False,
+        }
     except Exception:
         pass
     return {}
@@ -269,11 +270,7 @@ class LinkedInPostsBot:
             return
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=get_headless_mode(self.user_id),
-                args=["--no-sandbox", "--disable-dev-shm-usage",
-                      "--disable-blink-features=AutomationControlled"],
-            )
+            browser = await launch_browser(p, headless=get_headless_mode(self.user_id))
             self._browser = browser
             context = await browser.new_context(
                 storage_state=state_path, user_agent=USER_AGENT,

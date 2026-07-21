@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
+from workers.browser_launcher import launch_browser
 
 from workers.gemini_service import generate_cover_letter, render_cover_letter_template
 from workers.answer_helper import answer_application_question, save_question_answer
@@ -305,11 +306,7 @@ class JobStreetBot:
         has_session = os.path.exists(state_path)
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=get_headless_mode(self.user_id),
-                args=["--no-sandbox", "--disable-dev-shm-usage",
-                      "--disable-blink-features=AutomationControlled"],
-            )
+            browser = await launch_browser(p, headless=get_headless_mode(self.user_id))
             self._browser = browser
             ctx_opts = {"user_agent": USER_AGENT}
             if has_session:
@@ -325,8 +322,10 @@ class JobStreetBot:
 
             if not await has_jobstreet_session(page, context):
                 if has_session:
+                    self.emit({"type": "cookie_expired", "platform": "jobstreet",
+                               "message": "Cookie JobStreet expired. Login ulang dan upload cookie baru via /cookie jobstreet."})
                     self.emit({"type": "error", "platform": "jobstreet",
-                               "message": "Session expired. Login ulang di Settings."})
+                               "message": "Session expired. Login ulang via /cookie jobstreet."})
                     await browser.close()
                     return
                 for _ in range(90):

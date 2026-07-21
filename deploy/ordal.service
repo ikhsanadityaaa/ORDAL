@@ -1,0 +1,26 @@
+[Unit]
+Description=ORDAL Auto Apply Bot (Telegram-first)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ordal
+Group=ordal
+WorkingDirectory=/opt/ordal/backend
+EnvironmentFile=/opt/ordal/backend/.env
+ExecStart=/opt/ordal/backend/.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000 --loop asyncio
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Playwright butuh display virtual untuk headless mode
+Environment=DISPLAY=:99
+
+# Limit resource
+MemoryMax=2G
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

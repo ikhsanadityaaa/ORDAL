@@ -10,89 +10,11 @@ router = APIRouter()
 
 @router.post("/start")
 async def start_session(user=Depends(get_current_user)):
-    db = get_db()
-    running = db.execute(
-        "SELECT id FROM apply_sessions WHERE user_id = ? AND status = 'running'",
-        (user["id"],)
-    ).fetchone()
-    if running:
-        if session_manager.has_active_session(user["id"]):
-            db.close()
-            raise HTTPException(status_code=400, detail="Sesi sedang berjalan. Stop dulu sebelum memulai baru.")
-        db.execute("UPDATE apply_sessions SET status='stopped', ended_at=datetime('now') WHERE id=?", (running["id"],))
-        db.commit()
-
-    targets = db.execute("""
-        SELECT
-            t.id,
-            t.user_id,
-            t.cv_id,
-            t.position,
-            t.location,
-            t.platform,
-            COALESCE(t.employment_type, 'full_time') AS employment_type,
-            COALESCE(t.expected_salary, '') AS expected_salary,
-            COALESCE(t.available_join, '') AS available_join,
-            t.active,
-            t.created_at,
-            COALESCE(
-                NULLIF(trim(t.cover_letter), ''),
-                (
-                    SELECT jt.cover_letter
-                    FROM job_targets jt
-                    WHERE jt.user_id = t.user_id
-                      AND lower(trim(jt.position)) = lower(trim(t.position))
-                      AND jt.cover_letter IS NOT NULL
-                      AND trim(jt.cover_letter) != ''
-                    ORDER BY jt.created_at DESC, jt.id DESC
-                    LIMIT 1
-                )
-            ) AS cover_letter,
-            c.file_path,
-            c.file_name,
-            c.cv_text
-        FROM job_targets t JOIN cvs c ON c.id = t.cv_id
-        WHERE t.user_id = ? AND t.active = 1
-    """, (user["id"],)).fetchall()
-    if not targets:
-        db.close()
-        raise HTTPException(status_code=400, detail="Belum ada Job Target. Tambahkan target dulu.")
-
-    creds = db.execute(
-        "SELECT platform, email, password FROM user_credentials WHERE user_id = ?",
-        (user["id"],)
-    ).fetchall()
-    if not creds:
-        db.close()
-        raise HTTPException(status_code=400, detail="Belum ada credentials. Isi di Settings dulu.")
-
-    cur = db.execute("INSERT INTO apply_sessions (user_id, status) VALUES (?, 'running')", (user["id"],))
-    db.commit()
-    session_id = cur.lastrowid
-    db.close()
-
-    deduped_targets = []
-    seen_targets = set()
-    for t in [dict(row) for row in targets]:
-        key = (
-            (t.get("platform") or "").strip().lower(),
-            (t.get("position") or "").strip().lower(),
-            (t.get("location") or "").strip().lower(),
-            (t.get("employment_type") or "full_time").strip().lower(),
-            t.get("cv_id"),
-        )
-        if key in seen_targets:
-            continue
-        seen_targets.add(key)
-        deduped_targets.append(t)
-
-    await session_manager.start_session(
-        session_id=session_id,
-        user_id=user["id"],
-        targets=deduped_targets,
-        credentials=[dict(c) for c in creds]
-    )
-    return {"session_id": session_id, "message": "Sesi dimulai"}
+    """Mulai session apply manual (via HTTP API — dipakai untuk testing/debug)."""
+    result = await session_manager.start_session_for_user(user_id=user["id"], source="manual")
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("message", "Gagal memulai session"))
+    return {"session_id": result["session_id"], "message": "Sesi dimulai"}
 
 @router.post("/stop")
 async def stop_session(user=Depends(get_current_user)):

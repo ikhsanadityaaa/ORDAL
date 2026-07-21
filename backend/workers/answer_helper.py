@@ -1,9 +1,57 @@
 import re
+import asyncio
+import html
 from datetime import datetime
 from difflib import SequenceMatcher
 
 from database import get_db
 from workers.gemini_service import answer_question
+
+
+# ── Auto-apply mode state ──────────────────────────────────────────────
+# Saat session berjalan dalam mode 'auto' (dari scheduler), kita skip
+# blocking ask_user_question dan langsung pakai Gemini. Setelah Gemini
+# menjawab, kirim notifikasi ke Telegram supaya user bisa edit nanti.
+# Key: user_id -> {"main_loop": AbstractEventLoop, "chat_id": str}
+_auto_mode_state: dict[int, dict] = {}
+
+
+def set_auto_mode(user_id: int, main_loop=None, chat_id: str | None = None):
+    """Aktifkan/nonaktifkan auto-apply mode untuk user tertentu."""
+    if main_loop is not None and chat_id:
+        _auto_mode_state[user_id] = {"main_loop": main_loop, "chat_id": chat_id}
+    else:
+        _auto_mode_state.pop(user_id, None)
+
+
+def is_auto_mode(user_id: int) -> bool:
+    return user_id in _auto_mode_state
+
+
+def _notify_ai_answer(user_id: int, platform: str, question: str, answer: str):
+    """Kirim notifikasi Telegram bahwa AI sudah menjawab pertanyaan baru."""
+    state = _auto_mode_state.get(user_id)
+    if not state:
+        return
+    main_loop = state.get("main_loop")
+    chat_id = state.get("chat_id")
+    if not main_loop or not chat_id:
+        return
+    try:
+        from services.telegram_service import send_telegram_message
+        msg = (
+            "<b>🤖 AI menjawab pertanyaan baru</b>\n"
+            f"Platform: <b>{html.escape(platform)}</b>\n"
+            f"Pertanyaan: {html.escape(question[:280])}\n"
+            f"Jawaban AI: <i>{html.escape(answer[:280])}</i>\n\n"
+            "Jawaban ini sudah tersimpan & dipakai. "
+            "Kirim /questions untuk lihat atau edit."
+        )
+        asyncio.run_coroutine_threadsafe(
+            send_telegram_message(chat_id, msg), main_loop
+        )
+    except Exception:
+        pass
 
 
 def normalize_question(question: str) -> str:
@@ -239,6 +287,8 @@ async def answer_application_question(user_id: int, platform: str, question: str
     if _looks_like_resume_field(question):
         return ""
 
+    auto_mode = is_auto_mode(user_id)
+
     if _looks_like_experience_years(question):
         answer = _experience_answer(question, field_type, cv_text, job_title)
         if answer:
@@ -262,6 +312,17 @@ async def answer_application_question(user_id: int, platform: str, question: str
     if saved:
         return _numeric_answer(question, saved) if field_type == "number" else saved
 
+    # ── Auto-apply mode: skip blocking user prompt, go straight to AI ──
+    if auto_mode:
+        answer = await answer_question(question, field_type, cv_text, job_title)
+        if answer and field_type == "number":
+            answer = _numeric_answer(question, answer)
+        if answer:
+            save_question_answer(user_id, platform, question, answer, field_type, source="ai")
+            _notify_ai_answer(user_id, platform, question, answer)
+        return answer or ""
+
+    # ── Manual mode: block up to 10 min waiting for user reply ──
     if _looks_like_current_salary(question):
         if ask_user_question:
             answer = await ask_user_question(platform, question, field_type, job_title)

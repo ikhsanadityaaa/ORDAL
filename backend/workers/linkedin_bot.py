@@ -17,6 +17,7 @@ from urllib.parse import urlparse, urlencode
 
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from playwright.async_api import async_playwright
+from workers.browser_launcher import launch_browser
 
 from workers.gemini_service import generate_cover_letter, render_cover_letter_template
 from workers.answer_helper import answer_application_question, save_question_answer
@@ -130,11 +131,7 @@ class LinkedInBot:
             return
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=get_headless_mode(self.user_id),
-                args=["--no-sandbox", "--disable-dev-shm-usage",
-                      "--disable-blink-features=AutomationControlled"],
-            )
+            browser = await launch_browser(p, headless=get_headless_mode(self.user_id))
             self._browser = browser
             context = await browser.new_context(storage_state=state_path, user_agent=USER_AGENT)
             page    = await context.new_page()
@@ -147,8 +144,10 @@ class LinkedInBot:
                 pass
 
             if "login" in page.url or "authwall" in page.url:
+                self.emit({"type": "cookie_expired", "platform": "linkedin",
+                           "message": "Cookie LinkedIn expired. Login ulang dan upload cookie baru via /cookie linkedin."})
                 self.emit({"type": "error", "platform": "linkedin",
-                           "message": "Session expired. Login ulang di Settings."})
+                           "message": "Session expired. Login ulang via /cookie linkedin."})
                 await browser.close()
                 return
 

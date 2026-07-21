@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from database import init_db, get_db
+from database import init_db, get_db, restore_persisted_files
 from routers import auth, credentials, cv, targets, sessions, preferences, question_bank, telegram
 from routers.email_config import router as email_router
 
@@ -59,18 +59,23 @@ app.include_router(telegram.router, prefix="/api/telegram", tags=["Telegram"])
 @app.on_event("startup")
 async def startup():
     init_db()
+    restore_persisted_files()
     db = get_db()
     db.execute("UPDATE apply_sessions SET status='stopped', ended_at=datetime('now') WHERE status='running'")
     db.commit()
     db.close()
     from services.telegram_service import start_background_tasks
     start_background_tasks()
+    from services.auto_apply_scheduler import start_auto_apply_scheduler
+    start_auto_apply_scheduler()
 
 
 @app.on_event("shutdown")
 async def shutdown():
     from services.telegram_service import stop_background_tasks
     await stop_background_tasks()
+    from services.auto_apply_scheduler import stop_auto_apply_scheduler
+    await stop_auto_apply_scheduler()
 
 
 @app.get("/")
